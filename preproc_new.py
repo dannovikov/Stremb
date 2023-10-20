@@ -30,9 +30,11 @@ import random
 
 
 # input parameters
-fasta_file = ""
-distance_matrix_file = ""
-output_dir = ""
+fasta_file = r"E:\projects\hiv_deeplearning\stremb\data_pol\generated\final_output_no_subtypes.fasta"
+distance_matrix_file = r"G:\subtype_dists.csv"
+output_dir = r"G:\preproc"
+
+RECOMPUTE_EXISTING = False
 
 # Global variables
 SEQ_LEN = 0
@@ -44,12 +46,6 @@ def main():
     seqs_dictionary = read_fasta(fasta_file)
     subtype_distance_matrix = read_distance_matrix(distance_matrix_file)
     train_seqs, test_seqs = train_test_split(seqs_dictionary)
-
-    train_seqs_tensor = create_integer_encoding(train_seqs)
-    test_seqs_tensor = create_integer_encoding(test_seqs)
-
-    train_labels_tensor = create_labels_tensor(train_seqs)
-    test_labels_tensor = create_labels_tensor(test_seqs)
 
     (
         train_map_seqid_to_row,
@@ -64,8 +60,20 @@ def main():
         map_subtype_to_label,
     ) = create_maps(train_seqs, test_seqs)
 
-    train_contrasts = create_contrast_sets(train_seqs, subtype_distance_matrix, train_map_subtype_to_seqids)
-    test_contrasts = create_contrast_sets(test_seqs, subtype_distance_matrix, test_map_subtype_to_seqids)
+    # train_seqs_tensor = create_integer_encoding(train_seqs)
+    # save((train_seqs_tensor, "train_seqs_tensor"))
+    # test_seqs_tensor = create_integer_encoding(test_seqs)
+    # save((test_seqs_tensor, "test_seqs_tensor"))
+
+    train_seqs_tensor = load("train_seqs_tensor.pt")
+    test_seqs_tensor = load("test_seqs_tensor.pt")
+
+    train_labels_tensor = create_labels_tensor(train_seqs, map_subtype_to_label)
+    test_labels_tensor = create_labels_tensor(test_seqs, map_subtype_to_label)
+
+
+    train_contrasts = create_contrast_sets(train_seqs, subtype_distance_matrix, train_map_subtype_to_seqids, train_map_row_to_seqid, train_map_seqid_to_row)
+    test_contrasts = create_contrast_sets(test_seqs, subtype_distance_matrix, test_map_subtype_to_seqids, test_map_row_to_seqid, test_map_seqid_to_row)
 
     save(
         (train_seqs_tensor, "train_seqs_tensor"),
@@ -82,6 +90,8 @@ def main():
         (test_map_seqid_to_subtype, "test_map_seqid_to_subtype"),
         (train_contrasts, "train_contrasts"),
         (test_contrasts, "test_contrasts"),
+        (map_label_to_subtype, "map_label_to_subtype"),
+        (map_subtype_to_label, "map_subtype_to_label"),
     )
 
 
@@ -121,6 +131,8 @@ def read_distance_matrix(distance_matrix_file):
 
 def train_test_split(seqs_dict):
     seqs = list(seqs_dict.keys())
+    random.shuffle(seqs)
+    # train_seqs, test_seqs = sklearn_train_test_split(seqs, test_size=0.2, random_state=RAND_SEED)
     train_seqs, test_seqs = sklearn_train_test_split(seqs, test_size=0.2, random_state=RAND_SEED)
     train_seqs_dict = {seq: seqs_dict[seq] for seq in train_seqs}
     test_seqs_dict = {seq: seqs_dict[seq] for seq in test_seqs}
@@ -156,7 +168,7 @@ def create_labels_tensor(seqs_dict, map_subtype_to_label):
 
 def create_contrast_sets(seqs_dict, subtype_distance_matrix, map_subtype_to_seqids, map_row_to_seqid, map_seqid_to_row):
     contrasts = {}
-    for seq_id, sequence in seqs_dict.items():
+    for seq_id, sequence in tqdm(seqs_dict.items(), desc="Creating Contrast Sets", total=len(seqs_dict.keys())):
         row_num = map_seqid_to_row[seq_id]
         subtype = seq_id.split(".")[0]
 
@@ -175,7 +187,7 @@ def create_contrast_sets(seqs_dict, subtype_distance_matrix, map_subtype_to_seqi
 
 def create_similar_set(map_subtype_to_seqids, seq_id, subtype):
     # Similar examples: 5 random sequences from the same subtype
-    subtype_sequences = map_subtype_to_seqids[subtype]
+    subtype_sequences = map_subtype_to_seqids[subtype].copy()
     subtype_sequences.remove(seq_id)
     similar_sequences = random.sample(subtype_sequences, 5)
     return similar_sequences
@@ -207,6 +219,12 @@ def save(*args):
             with open(f"{output_dir}/{name}.pkl", "wb") as f:
                 pickle.dump(arg, f)
 
+def load(name):
+    if name.endswith(".pt"):
+        return torch.load(f"{output_dir}/{name}")
+    else:
+        with open(f"{output_dir}/{name}", "rb") as f:
+            return pickle.load(f)
 
 def create_maps(train_seqs, test_seqs):
     """
@@ -272,3 +290,6 @@ def create_maps(train_seqs, test_seqs):
         map_label_to_subtype,
         map_subtype_to_label,
     )
+
+if __name__ == "__main__":
+    main()
