@@ -14,23 +14,25 @@ import random
 import traceback
 
 if __name__ == "__main__":
-    wandb.init(project="seqvae")
+    wandb.init(project="seqvae2")
 
 from tqdm import tqdm
 
 TRAIN=True
 
 EPOCHS = 100
-BATCH_SIZE = 16
-LR = 0.0001
+BATCH_SIZE = 64
+LR = 0.001
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_DIR = "./data_pol"
+DATA_DIR = "./data_pol/new_noncurated/preproc"
+TRAINING_MODELS = "./data_pol/new_noncurated/training/models"
+TRAINING_IMAGES = "./data_pol/new_noncurated/training/images"
 EMBED_DIM = 2
-NUM_WORKERS = 0
+NUM_WORKERS = 6
 
 LOSS_RECON = 0.5
 LOSS_CLASS = 2.5
-LOSS_CONTRAST_SIM = 1.0
+LOSS_CONTRAST_SIM = 0.7#1.0
 LOSS_CONTRAST_DISSIM = 1.2
 
 
@@ -38,7 +40,7 @@ LOSS_CONTRAST_DISSIM = 1.2
 class SeqDataset(Dataset):
     def __init__(self, X, y, contrasts):
         self.X = X.float()
-        self.y = y
+        self.y = y.long()
         self.contrasts = contrasts
 
     def __len__(self):
@@ -52,21 +54,63 @@ class SeqDataset(Dataset):
         dissimilar_x = self.X[dissimilar_idx]
         return x, self.y[idx], similar_x, dissimilar_x, self.y[similar_idx], self.y[dissimilar_idx], idx
 
+
 def get_data():
-    X = torch.load(f"{DATA_DIR}/X.pt")
-    y = torch.load(f"{DATA_DIR}/y.pt")
-    with open(f"{DATA_DIR}/contrasts.pkl", "rb") as f:
-        contrasts = pickle.load(f)
+    #train
+    X_train = torch.load(f"{DATA_DIR}/train_seqs_tensor.pt")
+    y_train = torch.load(f"{DATA_DIR}/train_labels_tensor.pt")
+    with open(f"{DATA_DIR}/train_map_seqid_to_row.pkl", "rb") as f:
+        train_map_seqid_to_row = pickle.load(f)
+    with open(f"{DATA_DIR}/train_map_row_to_seqid.pkl", "rb") as f:
+        train_map_row_to_seqid = pickle.load(f)
+    with open(f"{DATA_DIR}/train_map_subtype_to_seqids.pkl", "rb") as f:
+        train_map_subtype_to_seqids = pickle.load(f)
+    with open(f"{DATA_DIR}/train_map_seqid_to_subtype.pkl", "rb") as f:
+        train_map_seqid_to_subtype = pickle.load(f)
+    with open(f"{DATA_DIR}/train_contrasts.pkl", "rb") as f:
+        train_contrasts = pickle.load(f)
+    #test
+    X_test = torch.load(f"{DATA_DIR}/test_seqs_tensor.pt")
+    y_test = torch.load(f"{DATA_DIR}/test_labels_tensor.pt")
+    with open(f"{DATA_DIR}/test_map_seqid_to_row.pkl", "rb") as f:
+        test_map_seqid_to_row = pickle.load(f)
+    with open(f"{DATA_DIR}/test_map_row_to_seqid.pkl", "rb") as f:
+        test_map_row_to_seqid = pickle.load(f)
+    with open(f"{DATA_DIR}/test_map_subtype_to_seqids.pkl", "rb") as f:
+        test_map_subtype_to_seqids = pickle.load(f)
+    with open(f"{DATA_DIR}/test_map_seqid_to_subtype.pkl", "rb") as f:
+        test_map_seqid_to_subtype = pickle.load(f)
+    with open(f"{DATA_DIR}/test_contrasts.pkl", "rb") as f:
+        test_contrasts = pickle.load(f)
+    #common
     with open(f"{DATA_DIR}/map_label_to_subtype.pkl", "rb") as f:
         map_label_to_subtype = pickle.load(f)
-    with open(f"{DATA_DIR}/map_row_to_seqid.pkl", "rb") as f:
-        map_row_to_seqid = pickle.load(f)
+    with open(f"{DATA_DIR}/map_subtype_to_label.pkl", "rb") as f:
+        map_subtype_to_label = pickle.load(f)
+
     result = {
-        "X": X,
-        "y": y,
-        "contrasts": contrasts,
-        "map_label_to_subtype": map_label_to_subtype,
-        "map_row_to_seqid": map_row_to_seqid,
+        "train": {
+            "X": X_train,
+            "y": y_train,
+            "map_seqid_to_row": train_map_seqid_to_row,
+            "map_row_to_seqid": train_map_row_to_seqid,
+            "map_subtype_to_seqids": train_map_subtype_to_seqids,
+            "map_seqid_to_subtype": train_map_seqid_to_subtype,
+            "contrasts": train_contrasts,
+        },
+        "test": {
+            "X": X_test,
+            "y": y_test,
+            "map_seqid_to_row": test_map_seqid_to_row,
+            "map_row_to_seqid": test_map_row_to_seqid,
+            "map_subtype_to_seqids": test_map_subtype_to_seqids,
+            "map_seqid_to_subtype": test_map_seqid_to_subtype,
+            "contrasts": test_contrasts,
+        },
+        "map": {
+            "label_to_subtype": map_label_to_subtype,
+            "subtype_to_label": map_subtype_to_label,
+        }
     }
     return result
 
@@ -140,7 +184,7 @@ class simpleNet(nn.Module):
     def classify(self, z):
         return self.classifier(z)
 
-def plot_latent_space(model, dataloader, epoch, with_labels = False, map_label_to_subtype=None, map_row_to_seqid=None):
+def plot_latent_space(model, dataloader, epoch, with_labels = False, map_label_to_subtype=None, map_row_to_seqid=None, map_subtype_to_seqids=None):
     model.eval()
     latent_space = []
     seq_ids = []
@@ -154,29 +198,23 @@ def plot_latent_space(model, dataloader, epoch, with_labels = False, map_label_t
             if with_labels:
                 seq_ids.extend([map_row_to_seqid[i] for i in idx.cpu().numpy()])
     latent_space = np.concatenate(latent_space)
-    # seq_ids = np.concatenate(seq_ids)
     print(latent_space.shape)
     labels = np.concatenate(labels)
 
     plt.figure(figsize=(10, 10))
     plt.scatter(latent_space[:, 0], latent_space[:, 1], c=labels)
     plt.colorbar()
-    # plt.xlim(-5, 5)
-    # plt.ylim(-5, 5)
 
     if with_labels:
-        # for i, label in enumerate(labels):
-        #     annotation = f"{map_label_to_subtype[label]}+{map_row_to_seqid[i]}"
-        #     plt.annotate(annotation, (latent_space[i, 0], latent_space[i, 1]))
+        subtype_label_positions = {}
+        for subtype in map_subtype_to_seqids.keys():
+            subtype_label_positions[subtype] = np.mean(latent_space[np.isin(seq_ids, map_subtype_to_seqids[subtype])], axis=0)
+        for subtype, pos in subtype_label_positions.items():
+            plt.annotate(subtype, pos, fontsize=8)
 
-        for i, seq_id in enumerate(seq_ids):
-            annotation = f"{seq_id}"
-            plt.annotate(annotation, (latent_space[i, 0], latent_space[i, 1]))
-
-
-        plt.savefig(f"./latent_space_{epoch}_labeled.png")
+        plt.savefig(f"{TRAINING_IMAGES}/latent_space_{epoch}_labeled.png")
     else:
-        plt.savefig(f"./latent_space_{epoch}.png")
+        plt.savefig(f"{TRAINING_IMAGES}/latent_space_{epoch}.png")
     plt.close()
 
 def classify_latent_space(model, dataloader, epoch):
@@ -200,50 +238,41 @@ def classify_latent_space(model, dataloader, epoch):
     plt.savefig(f"./latent_space_{epoch}_classified.png")
 
 
-
-
-
-
-if __name__ == '__main__':
+def main():
+    # Initialize data structures
     data = get_data()
-    X = data["X"]
-    y = data["y"]
-    print(X.shape)
-    print(y.shape)
-    contrasts = data["contrasts"]
-    map_row_to_seqid = data["map_row_to_seqid"]
-    map_label_to_subtype = data["map_label_to_subtype"]
+    X_train = data["train"]["X"]
+    y_train = data["train"]["y"]
+    X_test = data["test"]["X"]
+    y_test = data["test"]["y"]
+    train_contrasts = data["train"]["contrasts"]
+    test_contrasts = data["test"]["contrasts"]
+    map_row_to_seqid = data["train"]["map_row_to_seqid"]
+    map_label_to_subtype = data["map"]["label_to_subtype"]
 
-    # don't split into train and test because the contrast indices considered the whole dataset. Future: split during preproc
-    dataset = SeqDataset(X, y, contrasts)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    # Initialize dataloaders
+    train_dataset = SeqDataset(X_train, y_train, train_contrasts)
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
+
+    test_dataset = SeqDataset(X_test, y_test, test_contrasts)
+    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     # create the model
-    # model = SeqAEClassifier(sequence_length=X.shape[1], sequence_embedding_dim=EMBED_DIM, num_classes=len(map_label_to_subtype), num_LSTM_layers=LSTM_LAYERS)
-    model = simpleNet(sequence_length=X.shape[1], sequence_embedding_dim=EMBED_DIM, num_classes=len(map_label_to_subtype))
-    model.load_state_dict(torch.load("./model.pt"))
+    model = simpleNet(sequence_length=X_train.shape[1], sequence_embedding_dim=EMBED_DIM, num_classes=len(map_label_to_subtype))
+    # model.load_state_dict(torch.load('saved96_model_26.pt'))
     model.to(DEVICE)
 
-    # create the optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-
-    # create the loss functions
+    # Set up criteria, optimizer, and scheduler
     reconstruction_loss = nn.MSELoss()
     classification_loss = nn.CrossEntropyLoss()
     contrastive_loss = nn.CosineEmbeddingLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, verbose=True)
 
-    # create the scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1500, verbose=True)
-
-    classify_latent_space(model, dataloader, 550)
-    sys.exit()
-
-    # train the model
-
-    for epoch in range(450, 550):
-        plot_latent_space(model, dataloader, epoch)
-        # plot_latent_space(model, dataloader, epoch, with_labels=True, map_label_to_subtype=map_label_to_subtype, map_row_to_seqid=map_row_to_seqid)
-        for batch_idx, (x, y, similar_x, dissimilar_x, similar_y, dissimilar_y, _) in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch}"):
+    # Train the model
+    for epoch in range(EPOCHS):
+        plot_latent_space(model, train_dataloader, epoch, with_labels=True, map_label_to_subtype=map_label_to_subtype, map_row_to_seqid=map_row_to_seqid, map_subtype_to_seqids=data["train"]["map_subtype_to_seqids"])
+        for i, (x, y, similar_x, dissimilar_x, similar_y, dissimilar_y, rowidx) in tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f'Epoch: {epoch}'):
             model.train()
             x = x.to(DEVICE)
             y = y.to(DEVICE)
@@ -253,44 +282,118 @@ if __name__ == '__main__':
             dissimilar_y = dissimilar_y.to(DEVICE)
 
             optimizer.zero_grad()
-            embedding, reconstruction, classification = model(x)
-            similar_embedding, _, similar_classification = model(similar_x)
-            dissimilar_embedding, _, dissimilar_classification = model(dissimilar_x)
 
+            embedding, reconstruction, classification = model(x)
             rec_loss = reconstruction_loss(reconstruction, x)
             class_loss = classification_loss(classification, y)
 
+
+            similar_embedding, similar_reconstruction, similar_classification = model(similar_x)
             similar_x_class_loss = classification_loss(similar_classification, similar_y)
+            dissimilar_embedding, dissimilar_reconstruction, dissimilar_classification = model(dissimilar_x)
             dissimilar_x_class_loss = classification_loss(dissimilar_classification, dissimilar_y)
 
-            contrast_loss_sim = contrastive_loss(embedding, similar_embedding, torch.ones(embedding.shape[0]).to(DEVICE)) # we want the embeddings to be similar
-            contrast_loss_dissim = contrastive_loss(embedding, dissimilar_embedding, -1 * torch.ones(embedding.shape[0]).to(DEVICE)) # we want the embeddings to be dissimilar
-            
-            # loss = rec_loss + class_loss + similar_x_class_loss + dissimilar_x_class_loss + contrast_loss
-            loss = rec_loss * LOSS_RECON + class_loss * LOSS_CLASS + similar_x_class_loss * LOSS_CLASS + dissimilar_x_class_loss * LOSS_CLASS + contrast_loss_sim * LOSS_CONTRAST_SIM + contrast_loss_dissim * LOSS_CONTRAST_DISSIM
-            # loss = class_loss * LOSS_CLASS # + similar_x_class_loss * LOSS_CLASS + dissimilar_x_class_loss * LOSS_CLASS + contrast_loss_sim * LOSS_CONTRAST_SIM + contrast_loss_dissim * LOSS_CONTRAST_DISSIM
+            contrast_loss_sim = contrastive_loss(embedding, similar_embedding, torch.ones(embedding.shape[0]).to(DEVICE)) 
+            contrast_loss_dissim = contrastive_loss(embedding, dissimilar_embedding, -1 * torch.ones(embedding.shape[0]).to(DEVICE))
+
+            loss = rec_loss * LOSS_RECON + \
+                class_loss * LOSS_CLASS + \
+                similar_x_class_loss * LOSS_CLASS + \
+                dissimilar_x_class_loss * LOSS_CLASS + \
+                contrast_loss_sim * LOSS_CONTRAST_SIM + \
+                contrast_loss_dissim * LOSS_CONTRAST_DISSIM
             
             loss.backward()
+            wandb.log({"train_loss": loss.item()})
             optimizer.step()
-            # scheduler.step(loss)
-            # print(f"Epoch {epoch} Batch {batch_idx} Loss {loss.item()} = {rec_loss.item():.2f} * {LOSS_RECON} + {class_loss.item():.2f} * {LOSS_CLASS} + {similar_x_class_loss.item():.2f} * {LOSS_CLASS} + {dissimilar_x_class_loss.item():.2f} * {LOSS_CLASS} + {contrast_loss.item():.2f} * {LOSS_CONTRAST}")
-        torch.save(model.state_dict(), f"./model_{epoch}.pt")
 
-    # save the model
-    torch.save(model.state_dict(), "./model.pt")
+        model.eval()
+        with torch.no_grad():
+            avg_loss = 0
+            for x, y, similar_x, dissimilar_x, similar_y, dissimilar_y, rowidx in test_dataloader:
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
+                similar_x = similar_x.to(DEVICE)
+                dissimilar_x = dissimilar_x.to(DEVICE)
+                similar_y = similar_y.to(DEVICE)
+                dissimilar_y = dissimilar_y.to(DEVICE)
 
-    # plot the latent space
-    plot_latent_space(model, dataloader, epoch+1)
+                embedding, reconstruction, classification = model(x)
+                rec_loss = reconstruction_loss(reconstruction, x)
+                class_loss = classification_loss(classification, y)
 
-    # plot the latent space with labels
-    plot_latent_space(model, dataloader, epoch+1, with_labels=True, map_label_to_subtype=map_label_to_subtype, map_row_to_seqid=map_row_to_seqid)
 
-    # evaluate the model on classification accuracy
+                similar_embedding, similar_reconstruction, similar_classification = model(similar_x)
+                similar_x_class_loss = classification_loss(similar_classification, similar_y)
+                dissimilar_embedding, dissimilar_reconstruction, dissimilar_classification = model(dissimilar_x)
+                dissimilar_x_class_loss = classification_loss(dissimilar_classification, dissimilar_y)
+
+                contrast_loss_sim = contrastive_loss(embedding, similar_embedding, torch.ones(embedding.shape[0]).to(DEVICE)) 
+                contrast_loss_dissim = contrastive_loss(embedding, dissimilar_embedding, -1 * torch.ones(embedding.shape[0]).to(DEVICE))
+
+                loss = rec_loss * LOSS_RECON + \
+                    class_loss * LOSS_CLASS + \
+                    similar_x_class_loss * LOSS_CLASS + \
+                    dissimilar_x_class_loss * LOSS_CLASS + \
+                    contrast_loss_sim * LOSS_CONTRAST_SIM + \
+                    contrast_loss_dissim * LOSS_CONTRAST_DISSIM
+                avg_loss += loss.item()
+
+            avg_loss /= len(test_dataloader)
+            wandb.log({"test_loss": avg_loss})
+            scheduler.step(avg_loss)
+
+        torch.save(model.state_dict(), f"{TRAINING_MODELS}/model_{epoch}.pt")
+        
+        # evaluate the model on classification accuracy of the test set
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for x, y, _, _, _, _, _ in tqdm(test_dataloader, desc="Evaluating model"):
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
+                _, _, classification = model(x)
+                _, predicted = torch.max(classification.data, 1)
+                total += y.size(0)
+                correct += (predicted == y).sum().item()
+
+
+        print(f"Accuracy of the network on the {total} sequences: {100 * correct / total}%")
+
+
+def eval_model(model_path):
+    # Initialize data structures
+    data = get_data()
+    X_train = data["train"]["X"]
+    y_train = data["train"]["y"]
+    X_test = data["test"]["X"]
+    y_test = data["test"]["y"]
+    train_contrasts = data["train"]["contrasts"]
+    test_contrasts = data["test"]["contrasts"]
+    map_row_to_seqid = data["train"]["map_row_to_seqid"]
+    map_label_to_subtype = data["map"]["label_to_subtype"]
+
+    # Initialize dataloaders
+    train_dataset = SeqDataset(X_train, y_train, train_contrasts)
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
+
+    test_dataset = SeqDataset(X_test, y_test, test_contrasts)
+    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
+
+    # create the model
+    model = simpleNet(sequence_length=X_train.shape[1], sequence_embedding_dim=EMBED_DIM, num_classes=len(map_label_to_subtype))
+    model.load_state_dict(torch.load(model_path))
+    model.to(DEVICE)
+
+    plot_latent_space(model, train_dataloader, 16, with_labels=True, map_label_to_subtype=map_label_to_subtype, map_row_to_seqid=map_row_to_seqid, map_subtype_to_seqids=data["train"]["map_subtype_to_seqids"])
+
+    # evaluate the model on classification accuracy of the test set
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
-        for x, y, _, _, _, _, _ in tqdm(dataloader, desc="Evaluating model"):
+        for x, y, _, _, _, _, _ in tqdm(test_dataloader, desc="Evaluating model"):
             x = x.to(DEVICE)
             y = y.to(DEVICE)
             _, _, classification = model(x)
@@ -300,24 +403,28 @@ if __name__ == '__main__':
 
     print(f"Accuracy of the network on the {total} sequences: {100 * correct / total}%")
 
-    from sklearn.metrics import balanced_accuracy_score
-
-    y_true = []
-    y_pred = []
-
     with torch.no_grad():
-        for x, y, _, _, _, _, _ in tqdm(dataloader, desc="Evaluating model"):
+        for x, y, _,_,_,_,_ in tqdm(train_dataloader, desc="Evaluating model"):
             x = x.to(DEVICE)
             y = y.to(DEVICE)
             _, _, classification = model(x)
             _, predicted = torch.max(classification.data, 1)
-            y_true.extend(y.cpu().numpy())
-            y_pred.extend(predicted.cpu().numpy())
+            total += y.size(0)
+            correct += (predicted == y).sum().item()
 
-    print(f"Balanced accuracy of the network on the {total} sequences: {balanced_accuracy_score(y_true, y_pred)}")
+    classify_latent_space(model, train_dataloader, 16)
 
-    # plot the latent space with classification
-    classify_latent_space(model, dataloader, epoch+1)
+
+
+
+
+if __name__ == "__main__":
+    if TRAIN:
+        main()
+    else:
+        eval_model(r"E:\projects\hiv_deeplearning\stremb\cleanws\models\model_49.pt")
+
+
 
 
 

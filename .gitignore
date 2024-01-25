@@ -1,5 +1,11 @@
 *wandb*
-data_pol/
+# data_pol/
 latent_space_images/
 *.png
 *.pt
+# cleanws/
+*.csv
+*.pkl
+*.pt
+*.fasta
+*.out
